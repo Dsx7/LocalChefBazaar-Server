@@ -367,7 +367,8 @@ async function run() {
         });
 
         //Post users data
-        app.post("/users", verifyJWT, async (req, res) => {
+       // app.post("/users", verifyJWT, async (req, res) => {
+			app.post("/users", async (req, res) => {
             const users = req.body;
             users.userRole = "user"
             users.userStatus = "active"
@@ -749,8 +750,8 @@ async function run() {
                     mealId: paymentInfo?.mealId,
                     customer: paymentInfo?.customer.email
                 },
-                success_url: `${process.env.CLIENT_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-                cancel_url: `${process.env.CLIENT_DOMAIN}/dashboard/payment-cancel`,
+                success_url: `${process.env.CLIENT_DOMAIN}dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+                cancel_url: `${process.env.CLIENT_DOMAIN}dashboard/payment-cancel`,
             })
             res.send({ url: session.url })
         })
