@@ -24,6 +24,7 @@ const verifyJWT = async (req, res, next) => {
     if (!token) return res.status(401).send({ message: 'Unauthorized Access!' })
     try {
         const decoded = await admin.auth().verifyIdToken(token)
+        req.decoded = decoded
         next()
     } catch (err) {
         console.log(err)
@@ -48,6 +49,14 @@ async function run() {
         const reviewCollection = db.collection("reviews")
         const favoriteCollection = db.collection("favorites")
         const paymentCollection = db.collection("payments")
+        const scheduleCollection = db.collection("schedules")
+
+        await scheduleCollection.createIndex(
+            { chefId: 1, date: 1, startTime: 1, endTime: 1 },
+            { unique: true }
+        );
+        await scheduleCollection.createIndex({ chefId: 1, date: 1, startTime: 1 });
+        await scheduleCollection.createIndex({ chefId: 1, isActive: 1, remaining: 1, date: 1 });
 
         //get all user data for admin
         app.get("/users", verifyJWT, async (req, res) => {
@@ -316,6 +325,231 @@ async function run() {
             }
         });
 
+        //get chef delivery slots
+        app.get("/schedules", verifyJWT, async (req, res) => {
+            try {
+                const { chefId, date, from, to, includeInactive } = req.query;
+
+                if (!chefId) {
+                    return res.status(400).send({ message: "chefId is required" });
+                }
+
+                const query = { chefId };
+                const includeInactiveFlag =
+                    includeInactive === "true" || includeInactive === true;
+
+                if (!includeInactiveFlag) {
+                    query.isActive = true;
+                }
+
+                if (date) {
+                    query.date = date;
+                } else if (from || to) {
+                    query.date = {};
+                    if (from) query.date.$gte = from;
+                    if (to) query.date.$lte = to;
+                }
+
+                const slots = await scheduleCollection
+                    .find(query)
+                    .sort({ date: 1, startTime: 1 })
+                    .toArray();
+
+                res.send(slots);
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: "Failed to fetch delivery slots" });
+            }
+        });
+
+        //get available slots for ordering
+        app.get("/schedules/available", verifyJWT, async (req, res) => {
+            try {
+                const { chefId, from } = req.query;
+
+                if (!chefId) {
+                    return res.status(400).send({ message: "chefId is required" });
+                }
+
+                const today = from || new Date().toISOString().split("T")[0];
+
+                const slots = await scheduleCollection
+                    .find({
+                        chefId,
+                        isActive: true,
+                        remaining: { $gt: 0 },
+                        date: { $gte: today },
+                    })
+                    .sort({ date: 1, startTime: 1 })
+                    .toArray();
+
+                res.send(slots);
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: "Failed to fetch available slots" });
+            }
+        });
+
+        //create delivery slots
+        app.post("/schedules", verifyJWT, async (req, res) => {
+            try {
+                const { chefId, chefName, slots } = req.body;
+
+                if (!chefId) {
+                    return res.status(400).send({ message: "chefId is required" });
+                }
+
+                const slotList =
+                    Array.isArray(slots) && slots.length > 0 ? slots : [req.body];
+
+                const created = [];
+                const duplicates = [];
+
+                for (const slot of slotList) {
+                    const date = slot.date;
+                    const startTime = slot.startTime;
+                    const endTime = slot.endTime;
+                    const capacityNum = Number(slot.capacity);
+                    const timezone = slot.timezone || "Asia/Dhaka";
+
+                    if (!date || !startTime || !endTime || !capacityNum || capacityNum <= 0) {
+                        return res.status(400).send({
+                            message:
+                                "date, startTime, endTime and a positive capacity are required",
+                        });
+                    }
+
+                    const doc = {
+                        chefId,
+                        chefName: slot.chefName || chefName || "",
+                        date,
+                        startTime,
+                        endTime,
+                        capacity: capacityNum,
+                        remaining: capacityNum,
+                        timezone,
+                        isActive: true,
+                        createdAt: new Date(),
+                    };
+
+                    try {
+                        const insertResult = await scheduleCollection.insertOne(doc);
+                        created.push({ ...doc, _id: insertResult.insertedId });
+                    } catch (err) {
+                        if (err?.code === 11000) {
+                            duplicates.push({ date, startTime, endTime });
+                        } else {
+                            throw err;
+                        }
+                    }
+                }
+
+                if (created.length === 0 && duplicates.length > 0) {
+                    return res.status(409).send({
+                        message: "Slot already exists",
+                        duplicates,
+                    });
+                }
+
+                res.send({
+                    success: true,
+                    insertedCount: created.length,
+                    duplicates,
+                    created,
+                });
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: "Failed to create delivery slots" });
+            }
+        });
+
+        //update delivery slot
+        app.patch("/schedules/:id", verifyJWT, async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { capacity, isActive } = req.body;
+
+                const slot = await scheduleCollection.findOne({
+                    _id: new ObjectId(id),
+                });
+
+                if (!slot) {
+                    return res.status(404).send({ message: "Slot not found" });
+                }
+
+                const updateFields = { updatedAt: new Date() };
+
+                if (capacity !== undefined) {
+                    const capacityNum = Number(capacity);
+                    if (!Number.isFinite(capacityNum) || capacityNum <= 0) {
+                        return res
+                            .status(400)
+                            .send({ message: "Capacity must be a positive number" });
+                    }
+
+                    const booked = slot.capacity - slot.remaining;
+                    if (capacityNum < booked) {
+                        return res.status(400).send({
+                            message: "Capacity cannot be less than booked orders",
+                        });
+                    }
+
+                    updateFields.capacity = capacityNum;
+                    updateFields.remaining = capacityNum - booked;
+                }
+
+                if (typeof isActive !== "undefined") {
+                    updateFields.isActive = isActive === true || isActive === "true";
+                }
+
+                if (Object.keys(updateFields).length === 1) {
+                    return res
+                        .status(400)
+                        .send({ message: "No valid fields to update" });
+                }
+
+                await scheduleCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: updateFields }
+                );
+
+                res.send({ success: true });
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: "Failed to update delivery slot" });
+            }
+        });
+
+        //delete delivery slot
+        app.delete("/schedules/:id", verifyJWT, async (req, res) => {
+            try {
+                const { id } = req.params;
+                const slot = await scheduleCollection.findOne({
+                    _id: new ObjectId(id),
+                });
+
+                if (!slot) {
+                    return res.status(404).send({ message: "Slot not found" });
+                }
+
+                const booked = slot.capacity - slot.remaining;
+                if (booked > 0) {
+                    return res.status(400).send({
+                        message: "Slot has active bookings. Deactivate instead.",
+                    });
+                }
+
+                const result = await scheduleCollection.deleteOne({
+                    _id: new ObjectId(id),
+                });
+
+                res.send({ success: true, deletedCount: result.deletedCount });
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: "Failed to delete delivery slot" });
+            }
+        });
+
         //get total payment amount
         app.get("/payments", verifyJWT, async (req, res) => {
             try {
@@ -381,8 +615,59 @@ async function run() {
         app.post("/orders", verifyJWT, async (req, res) => {
             try {
                 const meals = req.body;
-                const totalPrice = Number(meals.foodPrice) * Number(meals.quantity);
-                meals.price = totalPrice
+                const quantity = Number(meals.quantity || 1);
+
+                if (!Number.isFinite(quantity) || quantity < 1) {
+                    return res.status(400).send({ message: "Quantity must be at least 1" });
+                }
+
+                const totalPrice = Number(meals.foodPrice) * quantity;
+                meals.price = totalPrice;
+                meals.quantity = quantity;
+
+                if (!meals.deliverySlotId) {
+                    return res.status(400).send({ message: "Delivery slot is required" });
+                }
+
+                const slotObjectId = new ObjectId(meals.deliverySlotId);
+
+                const slot = await scheduleCollection.findOne({
+                    _id: slotObjectId,
+                    chefId: meals.chefId,
+                });
+
+                if (!slot || !slot.isActive) {
+                    return res.status(404).send({ message: "Delivery slot not found" });
+                }
+
+                const updatedSlot = await scheduleCollection.findOneAndUpdate(
+                    {
+                        _id: slotObjectId,
+                        chefId: meals.chefId,
+                        isActive: true,
+                        remaining: { $gte: quantity },
+                    },
+                    {
+                        $inc: { remaining: -quantity },
+                        $set: { updatedAt: new Date() },
+                    },
+                    { returnDocument: "after" }
+                );
+
+                if (!updatedSlot.value) {
+                    return res
+                        .status(409)
+                        .send({ message: "Selected slot is full. Choose another." });
+                }
+
+                meals.deliverySlot = {
+                    slotId: meals.deliverySlotId,
+                    date: updatedSlot.value.date,
+                    startTime: updatedSlot.value.startTime,
+                    endTime: updatedSlot.value.endTime,
+                    timezone: updatedSlot.value.timezone,
+                };
+                meals.createdAt = new Date();
 
                 const result = await orderCollection.insertOne(meals);
 
@@ -624,6 +909,14 @@ async function run() {
                     return res.status(400).send({ message: "Invalid status" });
                 }
 
+                const existingOrder = await orderCollection.findOne({
+                    _id: new ObjectId(id),
+                });
+
+                if (!existingOrder) {
+                    return res.status(404).send({ message: "Order not found" });
+                }
+
                 const result = await orderCollection.updateOne(
                     { _id: new ObjectId(id) },
                     {
@@ -634,6 +927,30 @@ async function run() {
                         }
                     }
                 );
+
+                if (
+                    status === "cancelled" &&
+                    existingOrder.orderStatus !== "cancelled" &&
+                    existingOrder.deliverySlotId
+                ) {
+                    const slotObjectId = new ObjectId(existingOrder.deliverySlotId);
+                    const slot = await scheduleCollection.findOne({
+                        _id: slotObjectId,
+                    });
+
+                    if (slot) {
+                        const quantity = Number(existingOrder.quantity || 1);
+                        const newRemaining = Math.min(
+                            slot.capacity,
+                            slot.remaining + quantity
+                        );
+
+                        await scheduleCollection.updateOne(
+                            { _id: slotObjectId },
+                            { $set: { remaining: newRemaining, updatedAt: new Date() } }
+                        );
+                    }
+                }
 
                 res.send({ success: true });
             } catch (error) {
