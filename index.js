@@ -104,6 +104,26 @@ async function run() {
                     query.deliveryArea = req.query.deliveryArea;
                 }
 
+                if (req.query.dietary) {
+                    const dietaryTags = req.query.dietary
+                        .split(",")
+                        .map((tag) => tag.trim())
+                        .filter(Boolean);
+                    if (dietaryTags.length > 0) {
+                        query.dietaryTags = { $all: dietaryTags };
+                    }
+                }
+
+                if (req.query.excludeAllergens) {
+                    const excludeAllergens = req.query.excludeAllergens
+                        .split(",")
+                        .map((tag) => tag.trim())
+                        .filter(Boolean);
+                    if (excludeAllergens.length > 0) {
+                        query.allergens = { $nin: excludeAllergens };
+                    }
+                }
+
                 let sortOption = { createdAt: -1 };
 
                 if (req.query.sort) {
@@ -1095,6 +1115,20 @@ async function run() {
         //chef can post her meals
         app.post("/meals", verifyJWT, async (req, res) => {
             const meals = req.body;
+            const normalizeArray = (value) =>
+                Array.isArray(value) ? value : value ? [value] : [];
+
+            meals.dietaryTags = normalizeArray(meals.dietaryTags);
+            meals.allergens = normalizeArray(meals.allergens);
+
+            if (meals.nutrition) {
+                meals.nutrition = {
+                    calories: Number(meals.nutrition.calories || 0),
+                    protein: Number(meals.nutrition.protein || 0),
+                    carbs: Number(meals.nutrition.carbs || 0),
+                    fat: Number(meals.nutrition.fat || 0),
+                };
+            }
             meals.subscriptionEligible =
                 meals.subscriptionEligible === true || meals.subscriptionEligible === "true";
             meals.createdAt = new Date();
@@ -1211,6 +1245,31 @@ async function run() {
                 updatedData.subscriptionEligible =
                     updatedData.subscriptionEligible === true ||
                     updatedData.subscriptionEligible === "true";
+            }
+
+            if (typeof updatedData.dietaryTags !== "undefined") {
+                updatedData.dietaryTags = Array.isArray(updatedData.dietaryTags)
+                    ? updatedData.dietaryTags
+                    : updatedData.dietaryTags
+                    ? [updatedData.dietaryTags]
+                    : [];
+            }
+
+            if (typeof updatedData.allergens !== "undefined") {
+                updatedData.allergens = Array.isArray(updatedData.allergens)
+                    ? updatedData.allergens
+                    : updatedData.allergens
+                    ? [updatedData.allergens]
+                    : [];
+            }
+
+            if (updatedData.nutrition) {
+                updatedData.nutrition = {
+                    calories: Number(updatedData.nutrition.calories || 0),
+                    protein: Number(updatedData.nutrition.protein || 0),
+                    carbs: Number(updatedData.nutrition.carbs || 0),
+                    fat: Number(updatedData.nutrition.fat || 0),
+                };
             }
 
             const result = await mealsCollection.updateOne(
