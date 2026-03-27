@@ -50,6 +50,8 @@ async function run() {
         const favoriteCollection = db.collection("favorites")
         const paymentCollection = db.collection("payments")
         const scheduleCollection = db.collection("schedules")
+        const subscriptionPlanCollection = db.collection("subscription_plans")
+        const subscriptionCollection = db.collection("subscriptions")
 
         await scheduleCollection.createIndex(
             { chefId: 1, date: 1, startTime: 1, endTime: 1 },
@@ -57,6 +59,14 @@ async function run() {
         );
         await scheduleCollection.createIndex({ chefId: 1, date: 1, startTime: 1 });
         await scheduleCollection.createIndex({ chefId: 1, isActive: 1, remaining: 1, date: 1 });
+
+        await subscriptionPlanCollection.createIndex({ chefId: 1, isActive: 1 });
+        await subscriptionPlanCollection.createIndex({ stripePriceId: 1 });
+        await subscriptionCollection.createIndex({ userEmail: 1, status: 1 });
+        await subscriptionCollection.createIndex(
+            { stripeSubscriptionId: 1 },
+            { unique: true }
+        );
 
         //get all user data for admin
         app.get("/users", verifyJWT, async (req, res) => {
@@ -550,6 +560,345 @@ async function run() {
             }
         });
 
+        //get subscription plans
+        app.get("/subscription-plans", verifyJWT, async (req, res) => {
+            try {
+                const { chefId, activeOnly } = req.query;
+                const query = {};
+
+                if (chefId) {
+                    query.chefId = chefId;
+                }
+
+                if (activeOnly !== "false") {
+                    query.isActive = true;
+                }
+
+                const plans = await subscriptionPlanCollection
+                    .find(query)
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                res.send(plans);
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: "Failed to fetch subscription plans" });
+            }
+        });
+
+        //create subscription plan (chef)
+        app.post("/subscription-plans", verifyJWT, async (req, res) => {
+            try {
+                const {
+                    chefId,
+                    chefName,
+                    name,
+                    interval,
+                    price,
+                    mealsPerInterval,
+                    description,
+                } = req.body;
+
+                if (!chefId || !name || !interval || !price) {
+                    return res.status(400).send({
+                        message: "chefId, name, interval and price are required",
+                    });
+                }
+
+                if (!["week", "month"].includes(interval)) {
+                    return res.status(400).send({
+                        message: "Interval must be either 'week' or 'month'",
+                    });
+                }
+
+                const priceNum = Number(price);
+                if (!Number.isFinite(priceNum) || priceNum <= 0) {
+                    return res.status(400).send({ message: "Price must be positive" });
+                }
+
+                const mealsCount = Number(mealsPerInterval || 0);
+
+                const product = await stripe.products.create({
+                    name: `${name} (${interval}) - ${chefName || chefId}`,
+                    description: description || undefined,
+                });
+
+                const stripePrice = await stripe.prices.create({
+                    unit_amount: Math.round(priceNum * 100),
+                    currency: "usd",
+                    recurring: { interval },
+                    product: product.id,
+                });
+
+                const planDoc = {
+                    chefId,
+                    chefName: chefName || "",
+                    name,
+                    interval,
+                    price: priceNum,
+                    mealsPerInterval: mealsCount,
+                    description: description || "",
+                    stripeProductId: product.id,
+                    stripePriceId: stripePrice.id,
+                    isActive: true,
+                    createdAt: new Date(),
+                };
+
+                const result = await subscriptionPlanCollection.insertOne(planDoc);
+
+                res.send({ success: true, result, planId: result.insertedId });
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: "Failed to create subscription plan" });
+            }
+        });
+
+        //update subscription plan status
+        app.patch("/subscription-plans/:id", verifyJWT, async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { isActive } = req.body;
+
+                if (typeof isActive === "undefined") {
+                    return res
+                        .status(400)
+                        .send({ message: "isActive field is required" });
+                }
+
+                const result = await subscriptionPlanCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    {
+                        $set: {
+                            isActive: isActive === true || isActive === "true",
+                            updatedAt: new Date(),
+                        },
+                    }
+                );
+
+                res.send({ success: true, result });
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: "Failed to update subscription plan" });
+            }
+        });
+
+        //get subscriptions by user email
+        app.get("/subscriptions", verifyJWT, async (req, res) => {
+            try {
+                const email = req.query.email || req.decoded?.email;
+
+                if (!email) {
+                    return res.status(400).send({ message: "Email is required" });
+                }
+
+                const subscriptions = await subscriptionCollection
+                    .find({ userEmail: email })
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                res.send(subscriptions);
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: "Failed to fetch subscriptions" });
+            }
+        });
+
+        //pause or resume subscription
+        app.patch("/subscriptions/:id/pause", verifyJWT, async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { action } = req.body;
+
+                if (!["pause", "resume"].includes(action)) {
+                    return res
+                        .status(400)
+                        .send({ message: "Action must be pause or resume" });
+                }
+
+                const subscriptionDoc = await subscriptionCollection.findOne({
+                    _id: new ObjectId(id),
+                });
+
+                if (!subscriptionDoc) {
+                    return res.status(404).send({ message: "Subscription not found" });
+                }
+
+                if (!subscriptionDoc.stripeSubscriptionId) {
+                    return res.status(400).send({
+                        message: "Stripe subscription id missing",
+                    });
+                }
+
+                const stripeSub = await stripe.subscriptions.update(
+                    subscriptionDoc.stripeSubscriptionId,
+                    action === "pause"
+                        ? { pause_collection: { behavior: "mark_uncollectible" } }
+                        : { pause_collection: null }
+                );
+
+                const isPaused = action === "pause";
+
+                await subscriptionCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    {
+                        $set: {
+                            status: stripeSub.status,
+                            isPaused,
+                            updatedAt: new Date(),
+                        },
+                    }
+                );
+
+                res.send({ success: true, status: stripeSub.status, isPaused });
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: "Failed to update subscription" });
+            }
+        });
+
+        //skip next delivery (local flag)
+        app.patch("/subscriptions/:id/skip", verifyJWT, async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { skipNext } = req.body;
+
+                const result = await subscriptionCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    {
+                        $set: {
+                            skipNext: skipNext === true || skipNext === "true",
+                            updatedAt: new Date(),
+                        },
+                    }
+                );
+
+                res.send({ success: true, result });
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: "Failed to update skip status" });
+            }
+        });
+
+        //create stripe subscription session
+        app.post("/create-subscription-session", verifyJWT, async (req, res) => {
+            try {
+                const { planId } = req.body;
+
+                if (!planId) {
+                    return res.status(400).send({ message: "planId is required" });
+                }
+
+                const plan = await subscriptionPlanCollection.findOne({
+                    _id: new ObjectId(planId),
+                    isActive: true,
+                });
+
+                if (!plan) {
+                    return res.status(404).send({ message: "Plan not found" });
+                }
+
+                const session = await stripe.checkout.sessions.create({
+                    mode: "subscription",
+                    customer_email: req.decoded?.email,
+                    line_items: [
+                        {
+                            price: plan.stripePriceId,
+                            quantity: 1,
+                        },
+                    ],
+                    metadata: {
+                        planId: plan._id.toString(),
+                        chefId: plan.chefId,
+                        userEmail: req.decoded?.email || "",
+                    },
+                    success_url: `${process.env.CLIENT_DOMAIN}dashboard/subscription-success?session_id={CHECKOUT_SESSION_ID}`,
+                    cancel_url: `${process.env.CLIENT_DOMAIN}dashboard/subscription-cancel`,
+                });
+
+                res.send({ url: session.url });
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: "Failed to create subscription session" });
+            }
+        });
+
+        //subscription success (store subscription)
+        app.post("/subscription-success", verifyJWT, async (req, res) => {
+            try {
+                const { sessionId } = req.body;
+
+                if (!sessionId) {
+                    return res.status(400).send({ message: "sessionId is required" });
+                }
+
+                const session = await stripe.checkout.sessions.retrieve(sessionId, {
+                    expand: ["subscription", "customer"],
+                });
+
+                const subscription = session.subscription;
+
+                if (!subscription) {
+                    return res.status(400).send({ message: "Subscription not found" });
+                }
+
+                const existing = await subscriptionCollection.findOne({
+                    stripeSubscriptionId: subscription.id,
+                });
+
+                if (existing) {
+                    return res.send({
+                        success: true,
+                        alreadySubscribed: true,
+                        subscription: existing,
+                    });
+                }
+
+                const planId = session.metadata?.planId;
+                const plan = planId
+                    ? await subscriptionPlanCollection.findOne({
+                          _id: new ObjectId(planId),
+                      })
+                    : null;
+
+                const subscriptionDoc = {
+                    userEmail: session.customer_email,
+                    userName: req.body?.userName || "",
+                    planId: planId || "",
+                    planName: plan?.name || "",
+                    chefId: plan?.chefId || session.metadata?.chefId || "",
+                    chefName: plan?.chefName || "",
+                    price: plan?.price || null,
+                    interval: plan?.interval || null,
+                    stripeCustomerId:
+                        typeof session.customer === "string"
+                            ? session.customer
+                            : session.customer?.id,
+                    stripeSubscriptionId: subscription.id,
+                    stripePriceId:
+                        plan?.stripePriceId ||
+                        subscription?.items?.data?.[0]?.price?.id ||
+                        "",
+                    status: subscription.status,
+                    isPaused: !!subscription.pause_collection,
+                    currentPeriodStart: new Date(
+                        subscription.current_period_start * 1000
+                    ),
+                    currentPeriodEnd: new Date(
+                        subscription.current_period_end * 1000
+                    ),
+                    skipNext: false,
+                    createdAt: new Date(),
+                };
+
+                const result = await subscriptionCollection.insertOne(subscriptionDoc);
+
+                res.send({ success: true, result, subscription: subscriptionDoc });
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: "Failed to process subscription" });
+            }
+        });
+
         //get total payment amount
         app.get("/payments", verifyJWT, async (req, res) => {
             try {
@@ -746,6 +1095,8 @@ async function run() {
         //chef can post her meals
         app.post("/meals", verifyJWT, async (req, res) => {
             const meals = req.body;
+            meals.subscriptionEligible =
+                meals.subscriptionEligible === true || meals.subscriptionEligible === "true";
             meals.createdAt = new Date();
             const result = await mealsCollection.insertOne(meals);
             res.send(result);
@@ -855,6 +1206,12 @@ async function run() {
         app.put("/meals/:id", verifyJWT, async (req, res) => {
             const id = req.params.id;
             const updatedData = req.body;
+
+            if (typeof updatedData.subscriptionEligible !== "undefined") {
+                updatedData.subscriptionEligible =
+                    updatedData.subscriptionEligible === true ||
+                    updatedData.subscriptionEligible === "true";
+            }
 
             const result = await mealsCollection.updateOne(
                 { _id: new ObjectId(id) },
