@@ -114,7 +114,7 @@ async function run() {
 
                 const pipeline = [
                     { $match: query },
-                   
+                    
                     {
                         $addFields: {
                             priceNum: { $toDouble: "$price" },
@@ -602,7 +602,7 @@ async function run() {
 
         //Post users data
        // app.post("/users", verifyJWT, async (req, res) => {
-			app.post("/users", async (req, res) => {
+            app.post("/users", async (req, res) => {
             const users = req.body;
             users.userRole = "user"
             users.userStatus = "active"
@@ -636,36 +636,100 @@ async function run() {
                     chefId: meals.chefId,
                 });
 
-                if (!slot || !slot.isActive) {
+                const slotIsActive =
+                    slot?.isActive === true || slot?.isActive === "true";
+
+                if (!slot) {
                     return res.status(404).send({ message: "Delivery slot not found" });
+                }
+
+                if (!slotIsActive) {
+                    return res.status(409).send({
+                        message: "Selected slot is inactive. Choose another.",
+                    });
                 }
 
                 const updatedSlot = await scheduleCollection.findOneAndUpdate(
                     {
                         _id: slotObjectId,
                         chefId: meals.chefId,
-                        isActive: true,
-                        remaining: { $gte: quantity },
+                        isActive: { $in: [true, "true"] },
+                        $expr: {
+                            $gte: [
+                                { $toDouble: { $ifNull: ["$remaining", 0] } },
+                                quantity,
+                            ],
+                        },
                     },
-                    {
-                        $inc: { remaining: -quantity },
-                        $set: { updatedAt: new Date() },
-                    },
+                    [
+                        {
+                            $set: {
+                                remaining: {
+                                    $subtract: [
+                                        { $toDouble: { $ifNull: ["$remaining", 0] } },
+                                        quantity,
+                                    ],
+                                },
+                                updatedAt: new Date(),
+                            },
+                        },
+                    ],
                     { returnDocument: "after" }
                 );
 
-                if (!updatedSlot.value) {
-                    return res
-                        .status(409)
-                        .send({ message: "Selected slot is full. Choose another." });
+                // Handle both MongoDB driver v5 (.value wrapper) and v6+ (direct document)
+                const updatedSlotDoc = updatedSlot?.value || updatedSlot;
+
+                if (!updatedSlotDoc) {
+                    const latestSlot = await scheduleCollection.findOne({
+                        _id: slotObjectId,
+                        chefId: meals.chefId,
+                    });
+
+                    if (!latestSlot) {
+                        return res.status(404).send({ message: "Delivery slot not found" });
+                    }
+
+                    const latestIsActive =
+                        latestSlot.isActive === true || latestSlot.isActive === "true";
+
+                    if (!latestIsActive) {
+                        return res.status(409).send({
+                            message: "Selected slot is inactive. Choose another.",
+                        });
+                    }
+
+                    const remainingCount = Number(latestSlot.remaining || 0);
+                    if (remainingCount < quantity) {
+                        return res.status(409).send({
+                            message: `Only ${remainingCount} spot(s) remaining for this slot`,
+                        });
+                    }
+
+                    const responsePayload = {
+                        message: "Selected slot is unavailable. Choose another.",
+                    };
+
+                    if (process.env.NODE_ENV !== "production") {
+                        responsePayload.debug = {
+                            requestedQuantity: quantity,
+                            slotRemaining: remainingCount,
+                            slotIsActive: latestIsActive,
+                            slotChefId: latestSlot.chefId,
+                            orderChefId: meals.chefId,
+                            slotId: latestSlot._id,
+                        };
+                    }
+
+                    return res.status(409).send(responsePayload);
                 }
 
                 meals.deliverySlot = {
                     slotId: meals.deliverySlotId,
-                    date: updatedSlot.value.date,
-                    startTime: updatedSlot.value.startTime,
-                    endTime: updatedSlot.value.endTime,
-                    timezone: updatedSlot.value.timezone,
+                    date: updatedSlotDoc.date,
+                    startTime: updatedSlotDoc.startTime,
+                    endTime: updatedSlotDoc.endTime,
+                    timezone: updatedSlotDoc.timezone,
                 };
                 meals.createdAt = new Date();
 
