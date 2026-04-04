@@ -8,7 +8,7 @@ const verifyJWT = async (req, res, next) => {
     req.decoded = decoded;
     next();
   } catch (err) {
-    console.log(err);
+    // console.log(err);
     return res.status(401).send({ message: "Unauthorized Access!", err });
   }
 };

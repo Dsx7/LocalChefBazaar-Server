@@ -57,7 +57,7 @@ const updateUserProfile = ({ collections }) => async (req, res) => {
     },
   };
 
-  console.log(email, updateDoc);
+  // console.log(email, updateDoc);
 
   const result = await userCollection.updateOne({ userEmail: email }, updateDoc);
 
