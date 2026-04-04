@@ -30,6 +30,8 @@ const getContacts = ({ collections }) => async (req, res) => {
   }
 };
 
+const { ObjectId } = require("mongodb");
+
 const createContact = ({ collections }) => async (req, res) => {
   try {
     const { contactCollection } = collections;
@@ -64,4 +66,22 @@ const createContact = ({ collections }) => async (req, res) => {
   }
 };
 
-module.exports = { getContacts, createContact };
+const deleteContact = ({ collections }) => async (req, res) => {
+  try {
+    const { contactCollection } = collections;
+    const { id } = req.params;
+
+    const result = await contactCollection.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).send({ message: "Message not found" });
+    }
+
+    res.send({ success: true, deletedCount: result.deletedCount });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ message: "Failed to delete message" });
+  }
+};
+
+module.exports = { getContacts, createContact, deleteContact };
