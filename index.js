@@ -14,6 +14,7 @@ const createFavoritesRouter = require("./routes/favorites.routes");
 const createSchedulesRouter = require("./routes/schedules.routes");
 const createSubscriptionsRouter = require("./routes/subscriptions.routes");
 const createPaymentsRouter = require("./routes/payments.routes");
+const createContactsRouter = require("./routes/contacts.routes");
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -38,6 +39,7 @@ const startServer = async () => {
     app.use(createSchedulesRouter(deps));
     app.use(createSubscriptionsRouter(deps));
     app.use(createPaymentsRouter(deps));
+    app.use(createContactsRouter(deps));
 
     app.get("/", async (req, res) => {
       res.send("Server Was Running Successfully - LocalChefBazaar");

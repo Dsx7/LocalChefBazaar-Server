@@ -30,6 +30,7 @@ const getCollections = async () => {
     reviewCollection: db.collection("reviews"),
     favoriteCollection: db.collection("favorites"),
     paymentCollection: db.collection("payments"),
+    contactCollection: db.collection("contacts"),
     scheduleCollection: db.collection("schedules"),
     subscriptionPlanCollection: db.collection("subscription_plans"),
     subscriptionCollection: db.collection("subscriptions"),
