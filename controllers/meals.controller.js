@@ -127,14 +127,24 @@ const getMealById = ({ collections }) => async (req, res) => {
   }
 };
 
+const normalizeArray = (value) => {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+};
+
 const createMeal = ({ collections }) => async (req, res) => {
   const { mealsCollection } = collections;
   const meals = req.body;
-  const normalizeArray = (value) =>
-    Array.isArray(value) ? value : value ? [value] : [];
 
   meals.dietaryTags = normalizeArray(meals.dietaryTags);
   meals.allergens = normalizeArray(meals.allergens);
+  meals.foodImages = normalizeArray(meals.foodImages);
 
   if (meals.nutrition) {
     meals.nutrition = {
@@ -163,19 +173,15 @@ const updateMeal = ({ collections }) => async (req, res) => {
   }
 
   if (typeof updatedData.dietaryTags !== "undefined") {
-    updatedData.dietaryTags = Array.isArray(updatedData.dietaryTags)
-      ? updatedData.dietaryTags
-      : updatedData.dietaryTags
-      ? [updatedData.dietaryTags]
-      : [];
+    updatedData.dietaryTags = normalizeArray(updatedData.dietaryTags);
   }
 
   if (typeof updatedData.allergens !== "undefined") {
-    updatedData.allergens = Array.isArray(updatedData.allergens)
-      ? updatedData.allergens
-      : updatedData.allergens
-      ? [updatedData.allergens]
-      : [];
+    updatedData.allergens = normalizeArray(updatedData.allergens);
+  }
+
+  if (typeof updatedData.foodImages !== "undefined") {
+    updatedData.foodImages = normalizeArray(updatedData.foodImages);
   }
 
   if (updatedData.nutrition) {
